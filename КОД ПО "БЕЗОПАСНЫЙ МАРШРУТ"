@@ -1,0 +1,151 @@
+// Mega2560 sketch — Serial3 protocol receiver
+#include <Servo.h>
+
+Servo myservo;
+Servo right;
+Servo left;
+
+String buf = "";
+
+int left_percent = 50;
+int right_percent = 50;
+
+int percentToMicroseconds(int p) {
+  if (p < 0) p = 0;
+  if (p > 100) p = 100;
+  // map 0..100 -> 1400..1800
+  return 1400 + p * 2;
+}
+
+void setLeftPercent(int p) {
+  left_percent = constrain(p, 0, 100);
+  left.writeMicroseconds(percentToMicroseconds(left_percent));
+}
+
+void setRightPercent(int p) {
+  right_percent = constrain(p, 0, 100);
+  right.writeMicroseconds(percentToMicroseconds(right_percent));
+}
+
+void handleSingleChar(char c) {
+  switch (c) {
+    case 'a':
+      // вращение влево (пример)
+      right.writeMicroseconds(1800);
+      left.writeMicroseconds(1200);
+      break;
+    case 'd':
+      right.writeMicroseconds(1200);
+      left.writeMicroseconds(1800);
+      break;
+    case 'x':
+      right.writeMicroseconds(1500);
+      left.writeMicroseconds(1500);
+      myservo.writeMicroseconds(1500);
+      break;
+    case 'w':
+      right.writeMicroseconds(1200);
+      left.writeMicroseconds(1200);
+      break;
+    case 's':
+      right.writeMicroseconds(1800);
+      left.writeMicroseconds(1800);
+      break;
+    case 'q':
+      right.writeMicroseconds(1800);
+      left.writeMicroseconds(1200);
+      break;
+    case 'e':
+      right.writeMicroseconds(1200);
+      left.writeMicroseconds(1800);
+      break;
+    case 'r':
+      myservo.writeMicroseconds(2000);
+      break;
+    case 't':
+      myservo.writeMicroseconds(1420);
+      break;
+    default:
+      // неизвестная команда
+      break;
+  }
+}
+
+void parseBuffer(String s) {
+  s.trim();
+  if (s.length() == 0) return;
+
+  // одиночный символ
+  if (s.length() == 1 && !isDigit(s.charAt(0))) {
+    handleSingleChar(s.charAt(0));
+    return;
+  }
+
+  // команда с префиксом + число, например L50, R75, P90
+  char cmd = s.charAt(0);
+  String valstr = s.substring(1);
+  int val = valstr.toInt(); // если не число — 0
+
+  switch (cmd) {
+    case 'L':
+      setLeftPercent(val);
+      break;
+    case 'R':
+      setRightPercent(val);
+      break;
+    case 'P':
+      // servo angle 0..180 -> use write(angle)
+      val = constrain(val, 0, 180);
+      myservo.write(val);
+      break;
+    default:
+      // неизвестная многосимвольная команда
+      break;
+  }
+}
+
+void setup() {
+  myservo.attach(5);
+  right.attach(2);
+  left.attach(3);
+
+  // Serial (USB) остаётся для отладки
+  Serial.begin(115200);
+  Serial.println("Mega: starting. Listening on Serial3 at 9600.");
+
+  // UART3 - pins 14(TX3),15(RX3) on Mega
+  Serial3.begin(9600);
+  // установить начальные скорости на 50%
+  setLeftPercent(50);
+  setRightPercent(50);
+  myservo.write(90); // нейтральный угол
+}
+
+void loop() {
+  while (Serial3.available() > 0) {
+    char c = Serial3.read();
+    // Принят символ. разбираем по newline, либо одиночный символ
+    if (c == '\n' || c == '\r') {
+      if (buf.length() > 0) {
+        parseBuffer(buf);
+        // debug
+        Serial.print("Parsed: ");
+        Serial.println(buf);
+        buf = "";
+      }
+    } else {
+      buf += c;
+      // если это одиночный нецифровой символ — обработать сразу
+      if (buf.length() == 1 && !isDigit(buf.charAt(0))) {
+        parseBuffer(buf);
+        Serial.print("Parsed single: ");
+        Serial.println(buf);
+        buf = "";
+      }
+      // защитный предел длины
+      if (buf.length() > 10) {
+        buf = ""; // сброс на случай ошибки
+      }
+    }
+  }
+}
