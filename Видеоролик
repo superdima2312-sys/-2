@@ -1,1 +1,0 @@
-https://rutube.ru/video/private/fb63267dd010ed5f0bd5a5b08d8d468b/?p=veQmey3b_xhHiZUO-QsMuw
