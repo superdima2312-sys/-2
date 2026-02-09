@@ -1,0 +1,476 @@
+// ESP8266: поднимает AP, web UI и пересылает команды в контроллер ZARNITZA по UART
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+const char* AP_SSID = "Zarnitza_AP";
+const char* AP_PASS = "zarnitza1234";
+ESP8266WebServer server(80);
+const long SERIAL_BAUD = 38400; // UART -> Zarnitza
+const uint8_t LED_BLUE_PIN  = 14;
+const uint8_t LED_GREEN_PIN = 15;
+uint8_t ledG = 0, ledB = 0;
+uint8_t emotionPatterns[4][4] = {
+  { 66, 16, 16,  6 },
+  { 70, 16, 16, 70 },
+  {128, 16, 16,128 },
+  { 66, 48, 24,  6 }
+};
+uint8_t emotionIndex = 0;
+
+// HTML интерфейс
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zarnitza</title>
+<style>
+:root{--btn-size:72px;--btn-bg:#2b7cff;--btn-fg:#fff;--gap:10px}
+body{font-family:Arial,system-ui,-apple-system,Segoe UI,Roboto;margin:12px;padding:0;color:#222}
+h3{margin:6px 0 12px 0}
+.container{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}
+.panel{background:#fafafa;border:1px solid #eee;padding:12px;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,0.03)}
+.controls{display:flex;flex-direction:row;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.drive{display:grid;grid-template-columns:repeat(3,var(--btn-size));grid-template-rows:repeat(3,var(--btn-size));gap:var(--gap);align-items:center;justify-items:center}
+.btn{width:var(--btn-size);height:var(--btn-size);border-radius:10px;border:0;background:var(--btn-bg);color:var(--btn-fg);font-weight:600;font-size:16px;display:flex;align-items:center;justify-content:center;touch-action:manipulation}
+.btn:active{transform:scale(0.98)}
+.btn.stop{background:#444}
+.small{padding:6px 8px;border-radius:6px;border:0;background:#eee}
+.speed{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.clawBtn{min-width:110px;padding:8px 10px;border-radius:8px;border:0;background:#f0f0f0}
+.meta{font-size:12px;color:#666;margin-top:6px}
+.row{margin-bottom:8px}
+.row-inline{display:flex;gap:8px;align-items:center}
+.kbdHint{font-size:13px;color:#555;margin-top:8px}
+.sliderRow{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.slider{width:220px}
+.sliderWrap{display:flex;gap:12px;align-items:center}
+@media (max-width:520px){:root{--btn-size:64px}.container{padding:6px}.controls{flex-direction:column}.drive{margin:0 auto}}
+</style>
+</head>
+<body>
+<h3>Zarnitza control</h3>
+<div class="container">
+  <div class="panel" style="min-width:300px">
+    <div class="row"><button class="small" onclick="doEmotion()">Emotion ▶️</button> <span id="emotionIdx">0</span></div>
+    <div class="controls">
+      <div>
+        <div style="font-weight:700;margin-bottom:8px">Drive</div>
+        <div class="drive" id="driveGrid">
+          <div></div>
+          <button class="btn" id="upBtn" onclick="doMove('back', false)">▲</button>
+          <div></div>
+          <button class="btn" id="leftBtn" onclick="doMove('left', false)">◀️</button>
+          <button class="btn stop" id="stopBtn" onclick="doMove('stop', false)">■</button>
+          <button class="btn" id="rightBtn" onclick="doMove('right', false)">▶️</button>
+          <div></div>
+          <button class="btn" id="downBtn" onclick="doMove('forward', false)">▼</button>
+          <div></div>
+        </div>
+        <div class="sliderRow" style="margin-top:12px">
+          <div style="font-weight:700">Motion durations</div>
+          <div class="sliderWrap">
+            <label for="straightDur">Straight (ms)</label>
+            <input id="straightDur" class="slider" type="range" min="50" max="800" value="500" oninput="onStraightDur(this.value)">
+            <strong id="straightVal">500</strong>
+          </div>
+          <div class="sliderWrap">
+            <label for="turnDur">Turn (ms)</label>
+            <input id="turnDur" class="slider" type="range" min="25" max="400" value="400" oninput="onTurnDur(this.value)">
+            <strong id="turnVal">400</strong>
+          </div>          
+          <div class="meta">Forward/back uses Straight; Left/right uses Turn. Удержание клавиш — движение до отпускания.</div>
+        </div>
+        <div class="kbdHint">Keyboard: W = forward, S = back, A = left, D = right — удерживайте клавишу для движения</div>
+      </div>
+      <div class="panel speed" style="min-width:240px">
+        <div style="font-weight:700">Speed & Servo 1 (A6)</div>
+        <div style="width:100%">
+          <label for="speed">Motor speed</label>
+          <input id="speed" type="range" min="14" max="50" value="25" oninput="onSpeed(this.value)" style="width:100%">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px"><span>Current: <strong id="speedVal">25</strong></span> <button class="small" onclick="doMove('stop', false)">Send Stop</button></div>
+          <hr style="margin:10px 0">
+          <label for="servo1">Servo 1 (A6)</label>
+          <input id="servo1" type="range" min="0" max="180" value="90" oninput="setServo1(this.value)" style="width:100%">
+          <div style="margin-top:6px">Angle: <strong id="s1v">90</strong>°</div>
+        </div>
+      </div>
+      <div class="panel" style="min-width:180px">
+        <div style="font-weight:700">Claw</div>
+        <div style="display:flex;gap:8px;margin-top:8px"><button id="clawOpen" class="clawBtn" onclick="clawOpenCmd()">Open</button> <button id="clawClose" class="clawBtn" onclick="clawCloseCmd()">Close</button></div>
+        <div class="meta">State: <span id="clawState">OPEN</span></div>
+        <div class="meta">Locked for <span id="clawLockTimer">0</span> ms</div>
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <button class="small" onclick="ping()">PING</button> <span id="pong"></span>
+    </div>
+  </div>
+  <div class="panel" style="min-width:260px">
+    <div style="font-weight:700;margin-bottom:8px">LED control</div>
+    <div class="controlsColumn">
+      <div>
+        <label for="colorPicker">Color (red ignored)</label>
+        <input id="colorPicker" type="color" value="#000000" onchange="onColorPicker(this.value)" style="vertical-align:middle;margin-left:8px">
+        <span class="rgbPreview" id="rgbPreview" style="background:#000;width:22px;height:16px;display:inline-block;margin-left:8px;border:1px solid #ccc"></span>
+      </div>
+      <div>
+        <label>G <span id="gVal">0</span></label>
+        <input id="gRange" type="range" min="0" max="255" value="0" oninput="onGBRange()" style="width:100%">
+        <label>B <span id="bVal">0</span></label>
+        <input id="bRange" type="range" min="0" max="255" value="0" oninput="onGBRange()" style="width:100%">
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="presetBtn" onclick="setPreset(0,255)">Green</button>
+        <button class="presetBtn" onclick="setPreset(255,0)">Blue</button>
+        <button class="presetBtn" onclick="setPreset(128,128)">Cyan</button>
+        <button class="presetBtn" onclick="setPreset(0,0)">Off</button>
+      </div>
+      <div style="margin-top:6px"><button class="small" onclick="refreshLedState()">Refresh state</button> <span id="ledStateText"></span></div>
+      <div class="meta">Pins: BLUE=GPIO14, GREEN=GPIO15</div>
+    </div>
+  </div>
+</div>
+<script>
+function ajax(path,cb){var xhr=new XMLHttpRequest();xhr.open('GET',path,true);xhr.onreadystatechange=function(){if(xhr.readyState==4&&cb)cb(xhr.responseText)};xhr.send()}
+var duplicateDelay=110,clawLockTimeout=800,clawState=true,clawLockedUntil=0;
+function now(){return(new Date()).getTime()}
+function onSpeed(v){document.getElementById('speedVal').innerText=v}
+function onStraightDur(v){ document.getElementById('straightVal').innerText = v; }
+function onTurnDur(v){ document.getElementById('turnVal').innerText = v; }
+function sendMotorPair(v1,v2){
+  var url = '/motorpair?v1='+encodeURIComponent(v1)+'&v2='+encodeURIComponent(v2);
+  ajax(url);
+  lockClaw(clawLockTimeout);
+}
+function sendStopDuplicated(){ sendMotorPair(0,0); setTimeout(function(){ sendMotorPair(0,0); }, duplicateDelay); }
+function sendClawStateDuplicated(){ var angle=clawState?130:180; ajax('/servo?i=2&a='+encodeURIComponent(angle)); setTimeout(function(){ajax('/servo?i=2&a='+encodeURIComponent(angle))},duplicateDelay); if(!clawState) lockClaw(clawLockTimeout) }
+function lockClaw(ms){clawLockedUntil=now()+ms;updateClawUI();setTimeout(updateClawUI,ms+10)}
+function updateClawUI(){var rem=Math.max(0,clawLockedUntil-now());document.getElementById('clawLockTimer').innerText=rem;var openBtn=document.getElementById('clawOpen');openBtn.disabled=rem>0;document.getElementById('clawState').innerText=clawState?'OPEN':'CLOSED'}
+function getStraightDuration(){
+  return parseInt(document.getElementById('straightDur').value,10) || 500;
+}
+function getTurnDuration(){
+  return parseInt(document.getElementById('turnDur').value,10) || 400;
+}
+function doMove(dir, hold) {
+  hold = !!hold;
+  var sp = parseInt(document.getElementById('speed').value,10) || 0;
+  var v1 = 0, v2 = 0;
+  if (dir === 'forward') { v1 = sp; v2 = sp; }
+  else if (dir === 'back') { v1 = -sp; v2 = -sp; }
+  else if (dir === 'left') { v1 = -sp; v2 = sp; }
+  else if (dir === 'right') { v1 = sp; v2 = -sp; }
+  else if (dir === 'stop') { v1 = 0; v2 = 0; }
+  sendMotorPair(v1, v2);
+  if (dir === 'stop') {
+    sendStopDuplicated();
+    sendClawStateDuplicated();
+    return;
+  }
+  if (hold) return;
+  var duration = getStraightDuration();
+  if (dir === 'left' || dir === 'right') duration = getTurnDuration();
+  setTimeout(function(){
+    sendStopDuplicated();
+    sendClawStateDuplicated();
+  }, duration);
+}
+function doStop(){doMove('stop', false)}
+function clawOpenCmd(){if(now()<clawLockedUntil){var btn=document.getElementById('clawOpen'),orig=btn.innerText;btn.innerText='Blocked';setTimeout(function(){btn.innerText=orig},400);return}clawState=true;document.getElementById('clawState').innerText='OPEN';ajax('/servo?i=2&a=130');setTimeout(function(){ajax('/servo?i=2&a=130')},duplicateDelay)}
+function setServo1(v){document.getElementById('s1v').innerText=v;ajax('/servo?i=1&a='+encodeURIComponent(v))}
+function clawCloseCmd(){clawState=false;document.getElementById('clawState').innerText='CLOSED';ajax('/servo?i=2&a=180');setTimeout(function(){ajax('/servo?i=2&a=180')},duplicateDelay);lockClaw(clawLockTimeout)}
+function doEmotion(){ajax('/emotion',function(r){document.getElementById('emotionIdx').innerText=r})}
+function ping(){ajax('/ping',function(r){document.getElementById('pong').innerText=' '+r})}
+onSpeed(document.getElementById('speed').value);
+onStraightDur(document.getElementById('straightDur').value);
+onTurnDur(document.getElementById('turnDur').value);
+updateClawUI();
+function hexToRgb(hex) {
+  hex = hex.replace('#','');
+  if(hex.length===3) hex = hex.split('').map(function(h){return h+h}).join('');
+  var bigint = parseInt(hex,16);
+  return { r: (bigint>>16)&255, g: (bigint>>8)&255, b: bigint&255 };
+}
+function rgbToHex(r,g,b) {
+  return '#' + [r,g,b].map(function(x){var s=x.toString(16);return s.length==1?'0'+s:s}).join('');
+}
+function applyRgbUI(g,b){
+  document.getElementById('gVal').innerText = g;
+  document.getElementById('bVal').innerText = b;
+  document.getElementById('gRange').value = g;
+  document.getElementById('bRange').value = b;
+  document.getElementById('colorPicker').value = rgbToHex(0,g,b);
+  document.getElementById('rgbPreview').style.background = rgbToHex(0,g,b);
+  document.getElementById('ledStateText').innerText = ' G='+g+' B='+b;
+}
+function sendLed(g,b){
+  ajax('/led?g='+encodeURIComponent(g)+'&b='+encodeURIComponent(b), function(resp){
+  });
+}
+function onColorPicker(hex){
+  var c = hexToRgb(hex);
+  applyRgbUI(c.g, c.b);
+  sendLed(c.g, c.b);
+}
+function onGBRange(){
+  var g = parseInt(document.getElementById('gRange').value,10)||0;
+  var b = parseInt(document.getElementById('bRange').value,10)||0;
+  applyRgbUI(g,b);
+  sendLed(g,b);
+}
+function setPreset(g,b){
+  applyRgbUI(g,b);
+  sendLed(g,b);
+}
+function refreshLedState(){
+  ajax('/ledstate', function(resp){
+    try {
+      var obj = JSON.parse(resp);
+      applyRgbUI(obj.g||0,obj.b||0);
+    } catch(e){
+           console.log('ledstate parse err',e,resp);
+    }
+  });
+}
+refreshLedState();
+var keyState = {};
+document.addEventListener('keydown', function(e){
+  var key = e.key.toLowerCase();
+  if(document.activeElement && (document.activeElement.tagName==='INPUT' || document.activeElement.tagName==='TEXTAREA')) return;
+  if(keyState[key]) return;
+  if(key==='s' || key==='a' || key==='w' || key==='d') {
+    keyState[key] = true;
+    e.preventDefault();
+    if(key==='s') doMove('forward', true);
+    else if(key==='w') doMove('back', true);
+    else if(key==='a') doMove('left', true);
+    else if(key==='d') doMove('right', true);
+  } else if(key===' '){
+    e.preventDefault();
+    doMove('stop', false);
+  }
+});
+document.addEventListener('keyup', function(e){
+  var key = e.key.toLowerCase();
+  if(keyState[key]) keyState[key] = false;
+  if(key==='w' || key==='a' || key==='s' || key==='d') {
+    doMove('stop', false);
+  }
+});
+</script></body></html>)rawliteral";
+
+// --------------- хелперы --------------
+// вычислить XOR CRC
+uint8_t calcCRC(const String &s) {
+  uint8_t crc = 0;
+  for (size_t i = 0; i < s.length(); ++i) crc ^= (uint8_t)s[i];
+  return crc;
+}
+
+String byteToHex2(uint8_t b) {
+  char buf[3];
+  const char *hex = "0123456789ABCDEF";
+  buf[0] = hex[(b >> 4) & 0x0F];
+  buf[1] = hex[b & 0x0F];
+  buf[2] = '\0';
+  return String(buf);
+}
+
+void sendCmdToZarnitza(const String &s) {
+  String data = s;
+  while (data.endsWith("\n") || data.endsWith("\r")) data.remove(data.length()-1);
+  uint8_t crc = calcCRC(data);
+  String out = data + "*" + byteToHex2(crc) + "\n";
+  Serial.print(out);
+}
+
+String urlDecode(String input) {
+  String ret = input;
+  ret.replace("+"," ");
+  return ret;
+}
+
+long parseAnyInt(const String &s) {
+  String t = s;
+  t.trim();
+  if (t.length() == 0) return 0;
+  if (t.startsWith("0b") || t.startsWith("0B")) {
+    long v = 0;
+    for (size_t i = 2; i < t.length(); ++i) {
+      v <<= 1;
+      if (t[i] == '1') v |= 1;
+      else if (t[i] == '0') {}
+      else break;
+    }
+    return v;
+  } else if (t.startsWith("0x") || t.startsWith("0X")) {
+    return strtol(t.c_str()+2, NULL, 16);
+  } else {
+    return t.toInt();
+  }
+}
+
+void applyLedHardware(uint8_t g, uint8_t b) {
+  // analogWrite range on ESP8266 default 0..1023, map from 0..255
+  int awG = map(g, 0, 255, 0, 1023);
+  int awB = map(b, 0, 255, 0, 1023);
+  analogWrite(LED_GREEN_PIN, awG);
+  analogWrite(LED_BLUE_PIN, awB);
+}
+
+// -------------- хендлеры -------------
+void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
+
+void handleMotor() {
+  if (!server.hasArg("m") || !server.hasArg("v")) { server.send(400,"text/plain","missing"); return; }
+  int m = server.arg("m").toInt();
+  int v = server.arg("v").toInt(); v = constrain(v, -100, 100);
+  if (m<1||m>2){ server.send(400,"text/plain","bad"); return; }
+  sendCmdToZarnitza("M" + String(m) + " " + String(v));
+  const int ledPin = LED_BUILTIN;
+  digitalWrite(ledPin, HIGH);
+  delay(50);
+  digitalWrite(ledPin, LOW);
+  server.send(200,"text/plain","OK");
+}
+
+void handleMotorPair() {
+  if (!server.hasArg("v1") || !server.hasArg("v2")) { server.send(400,"text/plain","missing"); return; }
+  int v1 = server.arg("v1").toInt(); v1 = constrain(v1, -100, 100);
+  int v2 = server.arg("v2").toInt(); v2 = constrain(v2, -100, 100);
+  // Используем префикс MP (Motor Pair)
+  sendCmdToZarnitza("MP " + String(v1) + " " + String(v2));
+  server.send(200,"text/plain","OK");
+}
+
+void handleServo() {
+  if (!server.hasArg("i") || !server.hasArg("a")) { server.send(400,"text/plain","missing"); return; }
+  int i = server.arg("i").toInt();
+  int a = server.arg("a").toInt(); a = constrain(a,0,180);
+  if (i<1||i>2){ server.send(400,"text/plain","bad"); return; }
+  sendCmdToZarnitza("S" + String(i) + " " + String(a));
+  server.send(200,"text/plain","OK");
+}
+void handleDisplay() {
+  if (!server.hasArg("idx") || !server.hasArg("m")) { server.send(400,"text/plain","missing"); return; }
+  int idx = server.arg("idx").toInt();
+  if (idx < 0 || idx > 3) { server.send(400,"text/plain","bad idx"); return; }
+  String m = urlDecode(server.arg("m"));
+  long val = parseAnyInt(m);
+  sendCmdToZarnitza("D " + String(idx) + " " + String(val));
+  server.send(200,"text/plain","OK");
+}
+
+void handleDisplayAll() {
+  if (!server.hasArg("b0")||!server.hasArg("b1")||!server.hasArg("b2")||!server.hasArg("b3")) { server.send(400,"text/plain","missing"); return; }
+  long b0 = parseAnyInt(urlDecode(server.arg("b0")));
+  long b1 = parseAnyInt(urlDecode(server.arg("b1")));
+  long b2 = parseAnyInt(urlDecode(server.arg("b2")));
+  long b3 = parseAnyInt(urlDecode(server.arg("b3")));
+  sendCmdToZarnitza("DALL " + String(b0) + " " + String(b1) + " " + String(b2) + " " + String(b3));
+  server.send(200,"text/plain","OK");
+}
+
+void handleEmotion() {
+  emotionIndex = (emotionIndex + 1) % 4;
+  String cmd = "DALL ";
+  for (int i=0;i<4;i++) {
+    cmd += String((int)emotionPatterns[emotionIndex][i]);
+    if (i<3) cmd += " ";
+  }
+  sendCmdToZarnitza(cmd);
+  server.send(200,"text/plain", String(emotionIndex));
+}
+
+void handleLed() {
+  int g = -1, b = -1;
+  if (server.hasArg("hex")) {
+    String hx = server.arg("hex");
+    hx.trim();
+    if (hx.startsWith("#")) hx = hx.substring(1);
+    if (hx.length() == 3) {
+      char a = hx[0], b0 = hx[1], c = hx[2];
+      String s = "";
+      s += a; s += a; s += b0; s += b0; s += c; s += c;
+      hx = s;
+    }
+    if (hx.length() == 6) {
+      char buf[3];
+      buf[0] = hx.charAt(0); buf[1] = hx.charAt(1); buf[2] = '\0';
+      buf[0] = hx.charAt(2); buf[1] = hx.charAt(3);
+      g = (int) strtol(buf, NULL, 16);
+      buf[0] = hx.charAt(4); buf[1] = hx.charAt(5);
+      b = (int) strtol(buf, NULL, 16);
+    }
+  } else if (server.hasArg("g") && server.hasArg("b")) {
+    g = constrain(server.arg("g").toInt(), 0, 255);
+    b = constrain(server.arg("b").toInt(), 0, 255);
+  } else {
+    server.send(400,"text/plain","missing");
+    return;
+  }
+
+  if (g<0 || b<0) { server.send(400,"text/plain","bad"); return; }
+
+  // сохранить и применить
+  ledG = (uint8_t)g;
+  ledB = (uint8_t)b;
+  applyLedHardware(ledG, ledB);
+
+  server.send(200,"text/plain","OK");
+}
+
+void handlePing() {
+  sendCmdToZarnitza("PING");
+  unsigned long start = millis();
+  String resp = "";
+  while (millis() - start < 200) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 0x00) continue;
+      if (c == '\r') continue;
+      if (c == '\n') break;
+      resp += c;
+    }
+  }
+  if (resp.length() == 0) resp = "NOCON";
+  server.send(200,"text/plain", resp);
+}
+
+void handleLedState() {
+  String js = "{\"g\":" + String((int)ledG) + ",\"b\":" + String((int)ledB) + "}";
+  server.send(200,"application/json", js);
+}
+
+// ---------- основные функции ----------
+void setup() {
+  Serial.begin(SERIAL_BAUD); // UART -> Zarnitza
+  delay(50);
+
+  pinMode(LED_BLUE_PIN, OUTPUT);
+  pinMode(LED_GREEN_PIN, OUTPUT);
+  analogWriteRange(1023);
+  applyLedHardware(ledG, ledB);
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS);
+
+  server.on("/", handleRoot);
+  server.on("/motor", handleMotor);         // legacy
+  server.on("/motorpair", handleMotorPair); // новый
+  server.on("/servo", handleServo);
+  server.on("/display", handleDisplay);
+  server.on("/displayall", handleDisplayAll);
+  server.on("/emotion", handleEmotion);
+  server.on("/ping", handlePing);
+  server.on("/led", handleLed);
+  server.on("/ledstate", handleLedState);
+
+  server.begin();
+  Serial.printf("AP started. IP=%s\n", WiFi.softAPIP().toString().c_str());
+}
+void loop() {
+  server.handleClient();
+}
